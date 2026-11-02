@@ -46,6 +46,8 @@ export function CompanyModal() {
       onClose={ops.closeModal}
       footer={
         <div className="flex flex-wrap items-center gap-2">
+          {ops.me?.role === "admin" ? <Button onClick={() => ops.openModal({ type: "team" })}>Team access</Button> : null}
+          {ops.me?.role === "admin" ? <Button onClick={() => ops.openModal({ type: "backups" })}>Backups</Button> : null}
           <Button onClick={() => { window.location.href = "/api/auth/logout"; }}>Sign out</Button>
           <span className="flex-1" />
           <Button onClick={ops.closeModal}>Close</Button>

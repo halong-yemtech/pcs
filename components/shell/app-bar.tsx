@@ -7,8 +7,8 @@ import { useOps } from "@/components/providers/ops-provider";
 
 export function AppBar() {
   const ops = useOps();
-  const approvals = ops.attention.filter((item) => item.severity === "approval").length;
-  const count = ops.attention.length;
+  const approvals = ops.mineAttention.filter((item) => item.severity === "approval").length;
+  const count = ops.mineAttention.length;
   return (
     <header className="sticky top-[env(safe-area-inset-top,0px)] z-[5] border-b border-line bg-surface">
       <div className="flex flex-wrap items-center gap-3.5 px-[max(16px,env(safe-area-inset-left))] py-2.5 pr-[max(16px,env(safe-area-inset-right))]">

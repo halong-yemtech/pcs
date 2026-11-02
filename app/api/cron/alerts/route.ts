@@ -5,7 +5,7 @@ import { fail, json } from "@/lib/edge";
 export const runtime = "edge";
 export const dynamic = "force-dynamic";
 
-/** Hourly digest of stuck sales, late deliveries and approvals. */
+/** Morning digest of stuck sales, late deliveries and approvals. Runs at 07:00 Australia/Perth. */
 export async function GET(req: Request) {
   try {
     const secret = process.env.CRON_SECRET;

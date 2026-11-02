@@ -33,6 +33,7 @@ export function AttentionTable({ items }: { items: AttentionItem[] }) {
           <Th>Detail</Th>
           <Th>Owner</Th>
           <Th numeric>Days</Th>
+          <Th />
         </tr>
       </thead>
       <tbody>
@@ -49,6 +50,15 @@ export function AttentionTable({ items }: { items: AttentionItem[] }) {
             <Td className="text-[12.5px] text-muted">{item.detail}</Td>
             <Td className="text-[12.5px] text-muted">{item.severity === "approval" ? "Director" : ownerName(item.owner)}</Td>
             <Td numeric>{item.age || ""}</Td>
+            <Td>
+              <select className="rounded-app border border-line bg-sunk px-1.5 py-0.5" aria-label="Snooze" value="" onChange={(event) => { if (event.target.value) ops.snoozeAttention(item.key, Number(event.target.value)); }}>
+                <option value="">Snooze…</option>
+                <option value="1">1 day</option>
+                <option value="3">3 days</option>
+                <option value="7">1 week</option>
+                <option value="14">2 weeks</option>
+              </select>
+            </Td>
           </tr>
         ))}
       </tbody>
@@ -66,13 +76,18 @@ export function dealFlag(items: AttentionItem[], id: string) {
   );
 }
 
-function openAttention(ops: ReturnType<typeof useOps>, item: AttentionItem) {
+export function openAttention(ops: ReturnType<typeof useOps>, item: AttentionItem) {
+  const stay = ops.view === "tasks" && (item.coll === "deals" || item.coll === "pos");
   ops.closeModal();
+  if (item.coll === "items") {
+    ops.selectItem(item.id, "stock");
+    return;
+  }
   if (item.coll === "deals") {
-    ops.setView("sales");
+    if (!stay) ops.setView("sales");
     ops.openModal({ type: "deal", id: item.id });
   } else if (item.coll === "pos") {
-    ops.setView("purchasing");
+    if (!stay) ops.setView("purchasing");
     ops.setPurchTab("open");
     ops.openModal({ type: "po", id: item.id });
   } else if (item.coll === "rfqs") {

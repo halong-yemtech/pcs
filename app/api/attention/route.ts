@@ -1,5 +1,4 @@
-import { evaluateAttention } from "@/lib/domain/attention";
-import type { Workspace } from "@/lib/domain/types";
+import { evaluateAttention, type AttentionInput } from "@/lib/domain/attention";
 import { buildWorkspace } from "@/lib/fixtures/workspace";
 import { fail, json } from "@/lib/edge";
 
@@ -17,7 +16,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as Pick<Workspace, "deals" | "orders" | "pos" | "rfqs" | "customers">;
+    const body = (await req.json()) as AttentionInput;
     if (!body?.deals || !body.orders || !body.pos || !body.rfqs) {
       return json({ error: { code: "invalid", message: "deals, orders, pos and rfqs are required" } }, 400);
     }

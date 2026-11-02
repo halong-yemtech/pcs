@@ -12,6 +12,7 @@ import { SalesView } from "@/components/sales/sales-view";
 import { AppBar, isFullBleed } from "@/components/shell/app-bar";
 import { SideList } from "@/components/shell/side-list";
 import { StockView } from "@/components/stock/stock-view";
+import { TasksView } from "@/components/tasks/tasks-view";
 import { EmptyState, Panel } from "@/components/ui/panel";
 
 export function AppShell() {
@@ -46,6 +47,7 @@ function Shell() {
 
 function Workspace() {
   const ops = useOps();
+  if (ops.view === "tasks") return <TasksView />;
   if (ops.view === "sales") return <SalesView />;
   if (ops.view === "products") return <ProductWorkspace />;
   if (ops.view === "items") return <ItemWorkspace />;

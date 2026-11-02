@@ -1,11 +1,14 @@
 "use client";
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { evaluateAttention } from "@/lib/domain/attention";
+import { activeItems, attentionPayload, defaultAlertSettings, evaluateAttention, isApprover, itemFor } from "@/lib/domain/attention";
 import { compareCodes } from "@/lib/domain/bom";
-import { revLabel, todayISO } from "@/lib/domain/format";
+import { addDays, fmtDate, revLabel, todayISO } from "@/lib/domain/format";
 import type {
+  AlertSettings,
+  AlertState,
   AttentionItem,
+  BackupStatus,
   BuildOrder,
   Company,
   Customer,
@@ -34,7 +37,10 @@ export type ModalState =
   | { type: "po"; id: string }
   | { type: "product"; id?: string }
   | { type: "cell"; productId: string; variantId: string; role: string }
-  | { type: "stock-move"; id: string; move: "receive" | "issue" | "adjust" };
+  | { type: "stock-move"; id: string; move: "receive" | "issue" | "adjust" }
+  | { type: "team" }
+  | { type: "backups" }
+  | { type: "rules" };
 
 type Data = Workspace & { parts: Part[]; products: Product[] };
 
@@ -49,6 +55,19 @@ type OpsContextValue = {
   sortedParts: Part[];
   usedBy: Map<string, string[]>;
   attention: AttentionItem[];
+  mineAttention: AttentionItem[];
+  alertStates: AlertState[];
+  alertSettings: AlertSettings;
+  backup: BackupStatus | null;
+  approver: boolean;
+  taskTab: "mine" | "all";
+  setTaskTab: (tab: "mine" | "all") => void;
+  snoozeAttention: (key: string, days: number) => void;
+  dismissAttention: (key: string, reason: string) => void;
+  restoreAttention: (key: string) => void;
+  saveAlertSettings: (settings: AlertSettings) => void;
+  saveUser: (email: string, patch: { role?: string; title?: string; name?: string }) => void;
+  runBackup: () => Promise<void>;
   view: ViewId;
   setView: (view: ViewId) => void;
   itemQuery: string;
@@ -156,8 +175,12 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [data, setData] = useState<Data | null>(null);
   const [attention, setAttention] = useState<AttentionItem[]>([]);
+  const [alertStates, setAlertStates] = useState<AlertState[]>([]);
+  const [alertSettings, setAlertSettings] = useState<AlertSettings>(defaultAlertSettings);
+  const [backup, setBackup] = useState<BackupStatus | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [view, setView] = useState<ViewId>("sales");
+  const [view, setView] = useState<ViewId>("tasks");
+  const [taskTab, setTaskTab] = useState<"mine" | "all">("mine");
   const [itemQuery, setItemQuery] = useState("");
   const [itemFilter, setItemFilter] = useState("all");
   const [productQuery, setProductQuery] = useState("");
@@ -212,11 +235,16 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
         const workspace = await workspaceRes.json();
         const person = await meRes.json();
         if (cancel) return;
-        const { attention: edgeAttention, ...rest } = workspace;
-        setData({ ...rest, parts: catalog.parts, products: catalog.products });
-        setAttention(edgeAttention || []);
+        const { attention, ...rest } = workspace;
+        void attention;
+        const next = { ...rest, parts: catalog.parts, products: catalog.products };
+        setData(next);
+        setAttention(evaluateAttention(attentionPayload({ ...next, settings: defaultAlertSettings() })));
         setMe(person);
         setReady(true);
+        if (person.role === "admin") {
+          fetch("/api/admin/backups").then(async (res) => { if (res.ok) setBackup(await res.json()); }).catch(() => undefined);
+        }
       } catch (loadError) {
         console.error("operations load failed", loadError);
         if (!cancel) setError("Could not load the product database.");
@@ -228,11 +256,8 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const snapshot = useMemo(
-    () =>
-      data
-        ? { deals: data.deals, orders: data.orders, pos: data.pos, rfqs: data.rfqs, customers: data.customers }
-        : null,
-    [data],
+    () => (data ? attentionPayload({ ...data, settings: alertSettings }) : null),
+    [data, alertSettings],
   );
 
   useEffect(() => {
@@ -297,7 +322,54 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
     productMap,
     sortedParts,
     usedBy,
-    attention,
+    attention: activeItems(attention, alertStates),
+    mineAttention: activeItems(attention, alertStates).filter((entry) => itemFor(entry, me, data?.users || [])),
+    alertStates,
+    alertSettings,
+    backup,
+    approver: isApprover(me?.email || "", me?.role || "viewer", data?.users || []),
+    taskTab,
+    setTaskTab,
+    snoozeAttention: (key, days) => {
+      const until = addDays(todayISO(), days);
+      setAlertStates((current) => {
+        const next = current.filter((state) => state.key !== key);
+        next.push({ key, snoozedUntil: until });
+        return next;
+      });
+      toast(`Snoozed until ${fmtDate(until)}`);
+    },
+    dismissAttention: (key, reason) => {
+      setAlertStates((current) => {
+        const next = current.filter((state) => state.key !== key);
+        next.push({ key, dismissed: true, reason });
+        return next;
+      });
+      toast("Dismissed until something changes");
+    },
+    restoreAttention: (key) => setAlertStates((current) => current.filter((state) => state.key !== key)),
+    saveAlertSettings: (settings) => {
+      setAlertSettings(settings);
+      setDirty(true);
+      toast("Alert settings saved");
+    },
+    saveUser: (email, patch) => {
+      update((current) => ({
+        ...current,
+        users: current.users.some((user) => user.email === email)
+          ? current.users.map((user) => (user.email === email ? { ...user, ...patch } : user))
+          : [...current.users, { email, name: patch.name || email, title: patch.title || "", role: patch.role || "editor" }],
+      }));
+      toast("Access updated");
+    },
+    runBackup: async () => {
+      const res = await fetch("/api/admin/backups", { method: "POST" });
+      const body = await res.json();
+      if (body.ok) toast(`Backed up ${body.documents} records`);
+      else toast(body.error || "Backup failed");
+      const status = await fetch("/api/admin/backups");
+      if (status.ok) setBackup(await status.json());
+    },
     view,
     setView,
     itemQuery,
@@ -415,7 +487,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
     setStock: (id, patch) =>
       update((current) => ({
         ...current,
-        stock: { ...current.stock, [id]: { ...emptyStock(), ...current.stock[id], ...patch } },
+        stock: { ...current.stock, [id]: { ...emptyStock(), ...current.stock[id], ...patch, updatedAt: new Date().toISOString() } },
       })),
     moveStock: (id, qty, type, note) =>
       update((current) => {
@@ -432,7 +504,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
           at: new Date().toISOString(),
           by: me?.email || "",
         };
-        return { ...current, stock: { ...current.stock, [id]: { ...prev, onHand: after } }, moves: [move, ...current.moves] };
+        return { ...current, stock: { ...current.stock, [id]: { ...prev, onHand: after, updatedAt: move.at } }, moves: [move, ...current.moves] };
       }),
     saveCustomer: (customer) =>
       update((current) => {

@@ -2,6 +2,7 @@ export const LEVELS = ["Product", "Part", "Component", "Item"] as const;
 export type Level = (typeof LEVELS)[number];
 
 export const VIEWS = [
+  { id: "tasks", label: "Tasks" },
   { id: "sales", label: "Sales" },
   { id: "products", label: "Products" },
   { id: "items", label: "Items" },
@@ -344,6 +345,7 @@ export type StockRec = {
   reorder: number | null;
   location: string;
   supplierId: string;
+  updatedAt?: string;
 };
 export type StockMove = {
   id: string;
@@ -369,9 +371,29 @@ export type AttentionItem = {
   detail: string;
   owner: string;
   age: number;
-  coll: "deals" | "orders" | "pos" | "rfqs";
+  coll: "deals" | "orders" | "pos" | "rfqs" | "items";
   id: string;
   escalate: boolean;
+  requester?: string;
+  saleId?: string;
+};
+
+export type AlertRuleSetting = { on: boolean; days: number };
+
+export type AlertSettings = { rules: Record<string, AlertRuleSetting> };
+
+export type AlertState = {
+  key: string;
+  snoozedUntil?: string;
+  dismissed?: boolean;
+  reason?: string;
+};
+
+export type BackupStatus = {
+  runs: { at: string; trigger: string; ok: boolean; error?: string; documents?: number; files_new?: number; bytes?: number; location?: string }[];
+  targets: string[];
+  overdue: boolean;
+  lastOk: string | null;
 };
 
 export type Workspace = {
@@ -419,4 +441,4 @@ export const COMPANY_DEFAULT: Company = {
   xeroTaxPurch: "GST on Expenses",
 };
 
-export const FULL_BLEED: ViewId[] = ["sales", "stock", "orders", "purchasing", "expenses", "register"];
+export const FULL_BLEED: ViewId[] = ["tasks", "sales", "stock", "orders", "purchasing", "expenses", "register"];

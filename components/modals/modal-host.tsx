@@ -11,7 +11,8 @@ import { Button } from "@/components/ui/button";
 import { Field, SelectInput, TextInput } from "@/components/ui/field";
 import { Modal } from "@/components/ui/modal";
 import { DataTable, Td, Th } from "@/components/ui/table";
-import { fmtDate, money, qfmt } from "@/lib/domain/format";
+import { RULE_DEFS } from "@/lib/domain/attention";
+import { fmtDate, money, qfmt, when } from "@/lib/domain/format";
 import { PO_LABEL } from "@/lib/domain/types";
 import { useOps } from "@/components/providers/ops-provider";
 
@@ -31,15 +32,137 @@ export function ModalHost() {
   if (modal.type === "product") return <ProductModal id={modal.id} />;
   if (modal.type === "cell") return <CellModal productId={modal.productId} variantId={modal.variantId} role={modal.role} />;
   if (modal.type === "stock-move") return <StockMoveModal id={modal.id} move={modal.move} />;
+  if (modal.type === "team") return <TeamModal />;
+  if (modal.type === "backups") return <BackupsModal />;
+  if (modal.type === "rules") return <RulesModal />;
   return null;
 }
 
 function AttentionModal() {
   const ops = useOps();
+  const [tab, setTab] = useState<"mine" | "all">("mine");
+  const items = tab === "mine" ? ops.mineAttention : ops.attention;
+  const hidden = ops.alertStates.filter((state) => state.dismissed || (state.snoozedUntil && state.snoozedUntil > new Date().toISOString().slice(0, 10)));
   return (
-    <Modal wide title="Needs attention" eyebrow="Stuck sales, approvals, overdue builds, RFQs and deliveries" onClose={ops.closeModal} footer={<div className="flex justify-end"><Button onClick={ops.closeModal}>Close</Button></div>}>
-      <AttentionTable items={ops.attention} />
+    <Modal
+      wide
+      title="Needs attention"
+      eyebrow="Stuck sales, approvals, overdue builds, RFQs and deliveries"
+      onClose={ops.closeModal}
+      footer={<div className="flex justify-end gap-2">{ops.me?.role === "admin" ? <Button onClick={() => ops.openModal({ type: "rules" })}>Rules & limits</Button> : null}<Button onClick={ops.closeModal}>Close</Button></div>}
+    >
+      <div className="flex flex-wrap gap-1.5">
+        <Button className={tab === "mine" ? "border-accent bg-accent-soft text-accent" : ""} onClick={() => setTab("mine")}>For me ({ops.mineAttention.length})</Button>
+        <Button className={tab === "all" ? "border-accent bg-accent-soft text-accent" : ""} onClick={() => setTab("all")}>Everyone ({ops.attention.length})</Button>
+      </div>
+      <AttentionTable items={items} />
+      {hidden.length ? (
+        <details>
+          <summary className="cursor-pointer text-[12.5px] text-muted">Snoozed or dismissed ({hidden.length})</summary>
+          <DataTable>
+            <tbody>
+              {hidden.map((state) => (
+                <tr key={state.key}>
+                  <Td>{state.dismissed ? `Dismissed${state.reason ? `: ${state.reason}` : ""}` : `Snoozed until ${fmtDate(state.snoozedUntil)}`}</Td>
+                  <Td><Button size="sm" onClick={() => ops.restoreAttention(state.key)}>Restore</Button></Td>
+                </tr>
+              ))}
+            </tbody>
+          </DataTable>
+        </details>
+      ) : null}
       <p className="m-0 text-[12.5px] text-muted">A summary of these items is prepared each morning at 07:00 Australia/Perth. The list is evaluated by the attention Edge function.</p>
+    </Modal>
+  );
+}
+
+function TeamModal() {
+  const ops = useOps();
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("editor");
+  const [title, setTitle] = useState("");
+  const roles = ["viewer", "editor", "admin", "blocked"];
+  return (
+    <Modal wide title="Team access" onClose={ops.closeModal} footer={<div className="flex justify-end"><Button onClick={ops.closeModal}>Close</Button></div>}>
+      <p className="m-0 text-[12.5px] text-muted">Titles: Admin and Manager raise and send quotes and purchase orders. A Director approves anything over $20,000 and is the person the approval tasks wait on.</p>
+      <DataTable>
+        <thead><tr><Th>Person</Th><Th>Email</Th><Th>Access</Th><Th>Title</Th></tr></thead>
+        <tbody>
+          {(ops.data?.users || []).map((user) => (
+            <tr key={user.email}>
+              <Td>{user.name}</Td>
+              <Td className="font-mono text-muted">{user.email}</Td>
+              <Td>
+                <SelectInput value={user.role} onChange={(event) => ops.saveUser(user.email, { role: event.target.value })}>
+                  {roles.map((entry) => <option key={entry} value={entry}>{entry}</option>)}
+                </SelectInput>
+              </Td>
+              <Td>
+                <SelectInput value={user.title} onChange={(event) => ops.saveUser(user.email, { title: event.target.value })}>
+                  <option value="">—</option>
+                  {["Admin", "Manager", "Director"].map((entry) => <option key={entry}>{entry}</option>)}
+                </SelectInput>
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </DataTable>
+      <div className="flex flex-wrap items-end gap-2">
+        <Field label="Email"><TextInput value={email} placeholder="name@company.com.au" onChange={(event) => setEmail(event.target.value)} /></Field>
+        <Field label="Access"><SelectInput value={role} onChange={(event) => setRole(event.target.value)}>{roles.map((entry) => <option key={entry}>{entry}</option>)}</SelectInput></Field>
+        <Field label="Title"><SelectInput value={title} onChange={(event) => setTitle(event.target.value)}><option value="">Title…</option><option>Admin</option><option>Manager</option><option>Director</option></SelectInput></Field>
+        <Button onClick={() => {
+          const next = email.trim().toLowerCase();
+          if (!next) return;
+          ops.saveUser(next, { role, title, name: next });
+          setEmail("");
+        }}>Add / set</Button>
+      </div>
+    </Modal>
+  );
+}
+
+function BackupsModal() {
+  const ops = useOps();
+  const backup = ops.backup;
+  const names: Record<string, string> = { s3: "S3 storage", onedrive: "Microsoft 365 OneDrive / SharePoint", email: "Email copy" };
+  return (
+    <Modal wide title="Off-site backups" eyebrow="Every Sunday night, plus on demand" onClose={ops.closeModal} footer={<div className="flex justify-end"><Button onClick={ops.closeModal}>Close</Button></div>}>
+      {!backup?.targets.length ? <div className="rounded-app bg-rev-soft px-2.5 py-2 text-[13px] text-rev">No backup destination is set up yet. The developer adds S3, OneDrive/SharePoint or an email address in the server settings.</div> : <p className="m-0 text-[12.5px] text-muted">Backing up to: <strong>{backup.targets.map((target) => names[target] || target).join(", ")}</strong>.</p>}
+      {backup?.overdue ? <div className="rounded-app bg-rev-soft px-2.5 py-2 text-[13px] text-rev">{backup.lastOk ? `The last successful backup was ${when(backup.lastOk)}, more than a week ago.` : "No successful backup yet."}</div> : null}
+      <div><Button tone="primary" disabled={!backup?.targets.length} onClick={() => { void ops.runBackup(); }}>Back up now</Button></div>
+      <DataTable>
+        <thead><tr><Th>When</Th><Th>Type</Th><Th>Result</Th><Th numeric>Records</Th><Th numeric>New files</Th><Th numeric>Size</Th><Th>Where</Th></tr></thead>
+        <tbody>
+          {backup?.runs.length ? backup.runs.map((run) => (
+            <tr key={run.at}><Td>{when(run.at)}</Td><Td>{run.trigger}</Td><Td>{run.ok ? "OK" : "Failed"}</Td><Td numeric>{run.documents ?? ""}</Td><Td numeric>{run.files_new ?? ""}</Td><Td numeric>{run.bytes ? `${(run.bytes / 1024).toFixed(0)} KB` : ""}</Td><Td>{run.location}</Td></tr>
+          )) : <tr><Td className="text-muted">No backups yet.</Td></tr>}
+        </tbody>
+      </DataTable>
+      <p className="m-0 text-[12.5px] text-muted">To restore, the developer imports a backup zip and the files folder into a fresh database. Tokens for Xero are left out of backups on purpose.</p>
+    </Modal>
+  );
+}
+
+function RulesModal() {
+  const ops = useOps();
+  const [draft, setDraft] = useState(ops.alertSettings);
+  return (
+    <Modal wide title="Alert & approval settings" onClose={ops.closeModal} footer={<div className="flex justify-end gap-2"><Button onClick={() => ops.openModal({ type: "attention" })}>Back</Button><Button tone="primary" onClick={() => { ops.saveAlertSettings(draft); ops.openModal({ type: "attention" }); }}>Save settings</Button></div>}>
+      <p className="m-0 text-[12.5px] text-muted">When something counts as stuck. Set a day limit to 0 to flag it as soon as the date has passed. Directors are named under Company → Team access.</p>
+      <DataTable>
+        <thead><tr><Th>On</Th><Th>Rule</Th><Th numeric>Limit</Th><Th /></tr></thead>
+        <tbody>
+          {RULE_DEFS.map((rule) => (
+            <tr key={rule.id}>
+              <Td><input type="checkbox" checked={draft.rules[rule.id]?.on !== false} onChange={(event) => setDraft({ rules: { ...draft.rules, [rule.id]: { ...draft.rules[rule.id], on: event.target.checked, days: draft.rules[rule.id]?.days ?? rule.days } } })} /></Td>
+              <Td>{rule.label}</Td>
+              <Td numeric><TextInput className="text-right" type="number" min={0} value={draft.rules[rule.id]?.days ?? rule.days} onChange={(event) => setDraft({ rules: { ...draft.rules, [rule.id]: { on: draft.rules[rule.id]?.on !== false, days: Number(event.target.value) } } })} /></Td>
+              <Td className="text-muted">{rule.unit}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </DataTable>
     </Modal>
   );
 }

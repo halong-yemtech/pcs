@@ -1,6 +1,91 @@
-import { APPROVAL_QUOTE, type AttentionItem, type Workspace } from "./types";
-import { daysBetween, todayISO } from "./format";
-import { dealValue, quoteTotals } from "./sales";
+import { APPROVAL_QUOTE, type AlertSettings, type AlertState, type AttentionItem, type Me, type StaffUser, type Workspace } from "./types";
+import { daysBetween, num, todayISO } from "./format";
+import { dealValue, quoteTotals, suppliedQty } from "./sales";
+
+export const RULE_DEFS: { id: string; label: string; days: number; unit: string }[] = [
+  { id: "lead_idle", label: "Lead with no quote yet", days: 3, unit: "days in Lead" },
+  { id: "quote_followup", label: "Quote awaiting customer response", days: 7, unit: "days after it was sent" },
+  { id: "po_not_started", label: "Customer PO received, production not started", days: 2, unit: "days after the PO date" },
+  { id: "next_action", label: "Next action date passed", days: 0, unit: "days after the date" },
+  { id: "payment_overdue", label: "Invoice payment overdue", days: 0, unit: "days after due" },
+  { id: "build_overdue", label: "Build order past its due date", days: 0, unit: "days after due" },
+  { id: "po_late", label: "Supplier delivery late", days: 0, unit: "days after expected date" },
+  { id: "rfq_no_reply", label: "RFQ: supplier quote not received", days: 0, unit: "days after reply-by date" },
+  { id: "stock_low", label: "Stock below its minimum (counting stock on order)", days: 0, unit: "uses each item’s minimum on the Stock tab" },
+  { id: "sale_short", label: "Not enough stock for an open sale", days: 0, unit: "sales at PO received, production or ready" },
+];
+
+export function defaultAlertSettings(): AlertSettings {
+  return { rules: Object.fromEntries(RULE_DEFS.map((rule) => [rule.id, { on: true, days: rule.days }])) };
+}
+
+const TASK_ACT: Record<string, string> = {
+  approval: "Review & approve",
+  lead_idle: "Prepare the quote",
+  quote_followup: "Follow up the customer",
+  po_not_started: "Start production",
+  build_overdue: "Check the build",
+  payment_overdue: "Chase payment",
+  rfq_no_reply: "Chase the supplier",
+  po_late: "Chase the delivery",
+  next_action: "Do the next action",
+  stock_low: "Order more",
+  sale_short: "Order for the sale",
+};
+
+export function taskAction(item: AttentionItem, nextAction?: string, approver = true): string {
+  if (item.severity === "approval") return approver ? "Review & approve" : "Waiting on a Director";
+  if (item.rule === "next_action") return nextAction || TASK_ACT.next_action;
+  return TASK_ACT[item.rule] || "Open";
+}
+
+export type AttentionInput = Pick<Workspace, "deals" | "orders" | "pos" | "rfqs" | "customers"> & {
+  stock?: Workspace["stock"];
+  parts?: { id: string; partNo: string; description: string }[];
+  settings?: AlertSettings;
+};
+
+export function isApprover(email: string, role: string, users: StaffUser[]): boolean {
+  const directors = users.filter((user) => user.title === "Director").map((user) => user.email.toLowerCase());
+  if (directors.length) return directors.includes(email.toLowerCase());
+  return role === "admin";
+}
+
+export function itemFor(item: AttentionItem, me: Pick<Me, "email" | "role"> | null, users: StaffUser[]): boolean {
+  if (!me) return true;
+  const email = me.email.toLowerCase();
+  if (item.severity === "approval") return isApprover(email, me.role, users) || item.owner.toLowerCase() === email || item.requester === email;
+  if (item.owner && item.owner.toLowerCase() === email) return true;
+  const managers = users.filter((user) => user.title === "Manager" || user.role === "admin");
+  const manager = managers.some((user) => user.email.toLowerCase() === email) || (me.role === "admin" && managers.length === 0);
+  return manager && (item.escalate || !item.owner);
+}
+
+export function attentionPayload(data: Pick<Workspace, "deals" | "orders" | "pos" | "rfqs" | "customers" | "stock"> & { parts: { id: string; partNo: string; description: string }[]; settings?: AlertSettings }): AttentionInput {
+  const ids = new Set(Object.keys(data.stock));
+  for (const deal of data.deals) for (const line of deal.quote?.lines || []) if (line.itemId) ids.add(line.itemId);
+  const byId = new Map(data.parts.map((part) => [part.id, part]));
+  return {
+    deals: data.deals,
+    orders: data.orders,
+    pos: data.pos,
+    rfqs: data.rfqs,
+    customers: data.customers,
+    stock: data.stock,
+    settings: data.settings,
+    parts: [...ids].map((id) => ({ id, partNo: byId.get(id)?.partNo || id, description: byId.get(id)?.description || "" })),
+  };
+}
+
+export function activeItems(items: AttentionItem[], states: AlertState[], today = todayISO()): AttentionItem[] {
+  const byKey = new Map(states.map((state) => [state.key, state]));
+  return items.filter((item) => {
+    const state = byKey.get(item.key);
+    if (!state) return true;
+    if (state.dismissed) return false;
+    return !(state.snoozedUntil && state.snoozedUntil > today);
+  });
+}
 
 const ESCALATE_DAYS = 3;
 
@@ -10,16 +95,19 @@ function item(
   return { ...partial, escalate: partial.age >= ESCALATE_DAYS && partial.severity !== "approval" };
 }
 
-export function evaluateAttention(workspace: Pick<Workspace, "deals" | "orders" | "pos" | "rfqs" | "customers">, today = todayISO()): AttentionItem[] {
+export function evaluateAttention(workspace: AttentionInput, today = todayISO()): AttentionItem[] {
+  const settings = workspace.settings || defaultAlertSettings();
+  const on = (id: string) => settings.rules[id]?.on !== false;
+  const lim = (id: string) => num(settings.rules[id]?.days ?? RULE_DEFS.find((rule) => rule.id === id)?.days);
   const customers = new Map(workspace.customers.map((customer) => [customer.id, customer.name]));
   const items: AttentionItem[] = [];
 
   for (const deal of workspace.deals) {
     const who = customers.get(deal.customerId) || "No customer";
     const title = `${deal.no} · ${who}`;
-    if (deal.stage === "lead") {
+    if (on("lead_idle") && deal.stage === "lead") {
       const age = daysBetween(deal.createdAt.slice(0, 10), today);
-      if (age >= 3) {
+      if (age >= lim("lead_idle")) {
         items.push(item({
           key: `lead_idle:${deal.id}`,
           rule: "lead_idle",
@@ -34,9 +122,9 @@ export function evaluateAttention(workspace: Pick<Workspace, "deals" | "orders" 
         }));
       }
     }
-    if (deal.stage === "quote" && deal.quote?.sentAt) {
+    if (on("quote_followup") && deal.stage === "quote" && deal.quote?.sentAt) {
       const age = daysBetween(deal.quote.sentAt, today);
-      if (age >= 7) {
+      if (age >= lim("quote_followup")) {
         items.push(item({
           key: `quote_followup:${deal.id}`,
           rule: "quote_followup",
@@ -68,9 +156,9 @@ export function evaluateAttention(workspace: Pick<Workspace, "deals" | "orders" 
         }));
       }
     }
-    if (deal.stage === "po" && deal.po?.date) {
+    if (on("po_not_started") && deal.stage === "po" && deal.po?.date) {
       const age = daysBetween(deal.po.date, today);
-      if (age >= 2) {
+      if (age >= lim("po_not_started")) {
         items.push(item({
           key: `po_not_started:${deal.id}`,
           rule: "po_not_started",
@@ -85,8 +173,9 @@ export function evaluateAttention(workspace: Pick<Workspace, "deals" | "orders" 
         }));
       }
     }
-    if (deal.nextDate && deal.nextDate < today && !["closed", "lost"].includes(deal.stage)) {
-      items.push(item({
+    if (on("next_action") && deal.nextDate && deal.nextDate < today && !["closed", "lost"].includes(deal.stage)) {
+      const age = daysBetween(deal.nextDate, today);
+      if (age >= lim("next_action")) items.push(item({
         key: `next_action:${deal.id}`,
         rule: "next_action",
         severity: "overdue",
@@ -94,12 +183,12 @@ export function evaluateAttention(workspace: Pick<Workspace, "deals" | "orders" 
         title,
         detail: deal.nextAction || "No action written",
         owner: deal.owner,
-        age: daysBetween(deal.nextDate, today),
+        age,
         coll: "deals",
         id: deal.id,
       }));
     }
-    for (const invoice of deal.invoices) {
+    if (on("payment_overdue")) for (const invoice of deal.invoices) {
       if (!invoice.paid && invoice.due && invoice.due < today) {
         items.push(item({
           key: `payment_overdue:${deal.id}:${invoice.no}`,
@@ -117,7 +206,7 @@ export function evaluateAttention(workspace: Pick<Workspace, "deals" | "orders" 
     }
   }
 
-  for (const order of workspace.orders) {
+  if (on("build_overdue")) for (const order of workspace.orders) {
     if (order.status === "open" && order.due && order.due < today) {
       items.push(item({
         key: `build_overdue:${order.id}`,
@@ -134,7 +223,7 @@ export function evaluateAttention(workspace: Pick<Workspace, "deals" | "orders" 
     }
   }
 
-  for (const po of workspace.pos) {
+  if (on("po_late")) for (const po of workspace.pos) {
     if (["sent", "part"].includes(po.status) && po.expected && po.expected < today) {
       items.push(item({
         key: `po_late:${po.id}`,
@@ -151,7 +240,7 @@ export function evaluateAttention(workspace: Pick<Workspace, "deals" | "orders" 
     }
   }
 
-  for (const rfq of workspace.rfqs) {
+  if (on("rfq_no_reply")) for (const rfq of workspace.rfqs) {
     if (rfq.status === "sent" && rfq.replyBy && rfq.replyBy < today) {
       items.push(item({
         key: `rfq_no_reply:${rfq.id}`,
@@ -164,6 +253,79 @@ export function evaluateAttention(workspace: Pick<Workspace, "deals" | "orders" 
         age: daysBetween(rfq.replyBy, today),
         coll: "rfqs",
         id: rfq.id,
+      }));
+    }
+  }
+
+  const stock = workspace.stock || {};
+  const parts = new Map((workspace.parts || []).map((part) => [part.id, part]));
+  const onOrder = new Map<string, number>();
+  for (const po of workspace.pos) {
+    if (!["draft", "sent", "part"].includes(po.status)) continue;
+    for (const line of po.lines) {
+      const remaining = Math.max(0, num(line.qty) - num(line.received));
+      if (remaining > 0 && line.itemId) onOrder.set(line.itemId, (onOrder.get(line.itemId) || 0) + remaining);
+    }
+  }
+  if (on("sale_short")) {
+    const need = new Map<string, { deal: (typeof workspace.deals)[number]; qty: number }[]>();
+    for (const deal of workspace.deals) {
+      if (!["po", "production", "ready"].includes(deal.stage)) continue;
+      (deal.quote?.lines || []).forEach((line, index) => {
+        if (!line.itemId) return;
+        const built = workspace.orders.some((order) => order.dealId === deal.id && order.itemId === line.itemId);
+        const qty = Math.max(0, num(line.qty) - suppliedQty(deal, index));
+        if (qty > 0 && !built) {
+          const list = need.get(line.itemId) || [];
+          list.push({ deal, qty });
+          need.set(line.itemId, list);
+        }
+      });
+    }
+    for (const [id, list] of need) {
+      let available = num(stock[id]?.onHand) + (onOrder.get(id) || 0);
+      const ordered = [...list].sort((a, b) => String(a.deal.po?.required || a.deal.no).localeCompare(String(b.deal.po?.required || b.deal.no)));
+      for (const { deal, qty } of ordered) {
+        const short = Math.max(0, qty - Math.max(0, available));
+        available -= qty;
+        if (short <= 0) continue;
+        const part = parts.get(id);
+        const who = customers.get(deal.customerId) || deal.no;
+        items.push(item({
+          key: `sale_short:${deal.id}:${id}:${short}`,
+          rule: "sale_short",
+          severity: "overdue",
+          label: "Short for a sale",
+          title: `${part?.partNo || id} · ${deal.no}`,
+          detail: `Need ${qty} for ${who}${deal.po?.required ? ` by ${deal.po.required}` : ""}; ${num(stock[id]?.onHand)} on hand, ${onOrder.get(id) || 0} on order (short ${short})${part?.description ? ` · ${part.description}` : ""}`,
+          owner: deal.owner,
+          age: 0,
+          coll: "items",
+          id,
+          saleId: deal.id,
+        }));
+      }
+    }
+  }
+  if (on("stock_low")) {
+    for (const [id, row] of Object.entries(stock)) {
+      const minimum = num(row.min);
+      if (!minimum) continue;
+      const onHand = num(row.onHand);
+      const ordered = onOrder.get(id) || 0;
+      if (onHand >= minimum || onHand + ordered >= minimum) continue;
+      const part = parts.get(id);
+      items.push(item({
+        key: `stock_low:${id}:${onHand <= 0 ? "out" : "low"}:${String(row.updatedAt || "").slice(0, 10)}`,
+        rule: "stock_low",
+        severity: onHand <= 0 ? "overdue" : "due",
+        label: onHand <= 0 ? "Out of stock" : "Stock low",
+        title: `${part?.partNo || id}${part?.description ? ` · ${part.description}` : ""}`,
+        detail: `${onHand} on hand, minimum ${minimum}${ordered ? `, ${ordered} on order` : ""}${row.location ? ` · bin ${row.location}` : ""}`,
+        owner: "",
+        age: 0,
+        coll: "items",
+        id,
       }));
     }
   }

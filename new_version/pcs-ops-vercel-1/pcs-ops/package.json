@@ -1,0 +1,35 @@
+{
+  "name": "pcs-operations",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PCS BOM Register: end-to-end sales, production, stock, purchasing and Xero operations system",
+  "scripts": {
+    "dev": "next dev",
+    "vercel-build": "node scripts/migrate.mjs && node scripts/build-client.mjs && next build",
+    "build": "node scripts/build-client.mjs && next build",
+    "start": "next start",
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:import": "node scripts/import.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "node test/e2e.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@vercel/blob": "^1.0.0",
+    "next": "^15.5.7",
+    "pg": "^8.16.3",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.11.0",
+    "@types/react": "^19.1.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.3",
+    "playwright": "^1.50.0",
+    "jszip": "^3.10.1"
+  }
+}
